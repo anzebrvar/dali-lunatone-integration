@@ -651,10 +651,10 @@ class LunatoneClient:
             return lights
         return None
 
-    def _apply_external_state(
+    def _apply_gear_state(
         self, devices: list[DaliDevice], is_on: bool, brightness: int | None
     ) -> None:
-        """Update tracked state of gear changed by an external command and notify."""
+        """Update tracked state of gear changed by a bus command and notify."""
         for device in devices:
             old_state = (device.is_on, device.brightness)
             device.is_on = is_on
@@ -691,18 +691,18 @@ class LunatoneClient:
                 "External DAPC: address byte 0x%02X, level=%d, %d device(s)",
                 address_byte, opcode, len(targets),
             )
-            self._apply_external_state(targets, opcode > 0, round((opcode / 254) * 100))
+            self._apply_gear_state(targets, opcode > 0, round((opcode / 254) * 100))
             return
 
         if opcode == CMD_OFF:
             _LOGGER.debug("External OFF: address byte 0x%02X, %d device(s)", address_byte, len(targets))
-            self._apply_external_state(targets, False, 0)
+            self._apply_gear_state(targets, False, 0)
         elif opcode in (CMD_RECALL_MAX, CMD_RECALL_MIN, CMD_ON_AND_STEP_UP, CMD_GO_TO_LAST):
             _LOGGER.debug(
                 "External ON-type command %d: address byte 0x%02X, %d device(s)",
                 opcode, address_byte, len(targets),
             )
-            self._apply_external_state(targets, True, None)
+            self._apply_gear_state(targets, True, None)
             self._schedule_refresh(targets)
         elif opcode in (
             CMD_UP,
@@ -746,7 +746,7 @@ class LunatoneClient:
                 if brightness is None:
                     _LOGGER.debug("External refresh: no answer from address %d", address)
                     continue
-                self._apply_external_state([device], brightness > 0, brightness)
+                self._apply_gear_state([device], brightness > 0, brightness)
 
     async def _reconnect(self) -> None:
         """Attempt to reconnect to Lunatone."""
@@ -1829,6 +1829,10 @@ class LunatoneClient:
             address_byte = 0x80 | (group_number << 1)
             dali_data = [address_byte, level]
             await self._send_dali_frame(line, dali_data)
+            # Our own frames are not tracked from the bus monitor, so update members here
+            self._apply_gear_state(
+                self._resolve_command_targets(address_byte) or [], level > 0, round((level / 254) * 100)
+            )
             
             _LOGGER.debug("Set group %d brightness to level %d", group_number, level)
             return True
@@ -1880,6 +1884,10 @@ class LunatoneClient:
             # Broadcast command: address byte = 0xFE (broadcast unaddressed)
             dali_data = [0xFE, level]
             await self._send_dali_frame(line, dali_data)
+            # Our own frames are not tracked from the bus monitor, so update all gear here
+            self._apply_gear_state(
+                self._resolve_command_targets(0xFE) or [], level > 0, round((level / 254) * 100)
+            )
             
             _LOGGER.debug("Set broadcast brightness to level %d", level)
             return True

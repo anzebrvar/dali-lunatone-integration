@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Light state not updated when controlled by wall buttons / other bus masters** - External command tracking only understood direct arc power (DAPC) frames, but DALI-2 push-button couplers in application-controller mode typically send indirect commands (`GO TO LAST ACTIVE LEVEL`, `OFF`, `RECALL MAX`, `ON AND STEP UP`, `UP`/`DOWN`, scenes), often to a group. These are now handled for short, group and broadcast addresses: `OFF` and DAPC update state immediately; commands whose resulting level depends on gear settings mark the light on where certain and re-query only the addressed gear 1.5 s after the last command (debounced, so a long-press dim produces a single query). The group check also no longer mistakes special commands (`0xA1`-`0xFD`) for group frames, and frames from lines other than the scanned line 0 are ignored.
+- **Group and broadcast lights had no state** - `DaliGroupLight` and `DaliBroadcastLight` never reported `is_on`/`brightness`, so they showed as unknown. They now derive state from their member lights (on if any member is on, brightness is the mean of members that are on), and group/broadcast commands sent from Home Assistant update the member lights' tracked state.
 
 ## [0.1.4-beta-3] - 2026-03-13
 
