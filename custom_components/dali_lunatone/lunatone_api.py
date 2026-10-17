@@ -46,6 +46,7 @@ from .const import (
     CMD_STORE_ACTUAL_LEVEL_IN_DTR,
     CMD_UP,
     CONNECTION_TIMEOUT,
+    DALI_LINE_SPAN,
     DALI_MASK,
     EXTERNAL_REFRESH_DELAY,
     FEATURE_TYPES,
@@ -56,6 +57,30 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+
+def line_address(line: int, short_address: int) -> int:
+    """Return the device key address for a short address on a DALI line."""
+    return line * DALI_LINE_SPAN + short_address
+
+
+def split_address(address: int, line: int = 0) -> tuple[int, int]:
+    """Return (line, short address) for a device key address.
+
+    Key addresses below DALI_LINE_SPAN are plain line-0 short addresses, so the
+    explicit ``line`` argument is only used for those.
+    """
+    if address >= DALI_LINE_SPAN:
+        return address // DALI_LINE_SPAN, address % DALI_LINE_SPAN
+    return line, address
+
+
+def device_label(protocol: str, address: int) -> str:
+    """Return the default device name, e.g. "DALI Address 4" or "DALI Line 1 Address 4"."""
+    line, short_address = split_address(address)
+    if line == 0:
+        return f"{protocol} Address {short_address}"
+    return f"{protocol} Line {line} Address {short_address}"
 
 
 def gtin_hex_to_decimal(gtin_hex: str) -> str | None:
@@ -257,6 +282,16 @@ class DaliDevice:
         """Check if device supports DALI2."""
         return self.protocol == "DALI2"
 
+    @property
+    def line(self) -> int:
+        """Return the DALI line (bus) the device is on."""
+        return split_address(self.address)[0]
+
+    @property
+    def short_address(self) -> int:
+        """Return the device's short address on its line (0-63)."""
+        return split_address(self.address)[1]
+
     def __repr__(self) -> str:
         """Return string representation."""
         groups_str = f", groups={self.groups}" if self.groups else ""
@@ -287,6 +322,7 @@ class LunatoneClient:
         self._pending_requests: dict[int, asyncio.Future] = {}
         self._response_queue: asyncio.Queue = asyncio.Queue()  # Queue for daliFrame responses
         self._recent_monitor_frames: dict[str, float] = {}  # Cache for deduplicating daliMonitor frames
+        self.lines: list[int] = [0]  # DALI lines to scan and follow (set from the config entry options)
         self._pending_refresh: set[int] = set()  # Short addresses to re-query after external commands
         self._refresh_due: float = 0.0
         self._refresh_task: asyncio.Task | None = None
@@ -446,7 +482,8 @@ class LunatoneClient:
             
             # Deduplicate frames - gateway sends duplicates for reliability
             # Create unique key from frame data and timestamp
-            frame_key = f"{num_bits}:{','.join(map(str, dali_data))}"
+            line = frame_data.get("line", 0)
+            frame_key = f"{line}:{num_bits}:{','.join(map(str, dali_data))}"
             current_time = frame_data.get("timestamp", 0)
             
             # Check if we've seen this frame very recently (within 0.5 seconds)
@@ -464,21 +501,23 @@ class LunatoneClient:
             for k in expired_keys:
                 del self._recent_monitor_frames[k]
             
+            # Devices are only known on the configured lines; frames from other
+            # lines would be attributed to the wrong gear
+            if line not in self.lines:
+                return
+
             # Check if this is a DALI2 event (24-bit frame)
             if num_bits == 24 and len(dali_data) == 3:
                 # Reformat to match expected structure
-                event_data = {"daliData": dali_data}
+                event_data = {"daliData": dali_data, "line": line}
                 await self._handle_dali2_event(event_data)
             elif num_bits == 16 and len(dali_data) == 2:
                 # Handle 16-bit DALI command for external device control monitoring
                 # Only process external commands (not our own queries)
                 is_external = frame_data.get("externalSource", False)
                 is_query = frame_data.get("query", False)
-                # Devices are only scanned on line 0, so frames from other lines
-                # would be attributed to the wrong gear
-                on_scanned_line = frame_data.get("line", 0) == 0
-                if is_external and not is_query and on_scanned_line:
-                    event_data = {"daliData": dali_data}
+                if is_external and not is_query:
+                    event_data = {"daliData": dali_data, "line": line}
                     await self._handle_dali_command(event_data)
             return
         
@@ -521,7 +560,7 @@ class LunatoneClient:
             _LOGGER.debug("DALI2 event: address=%d, instance=%d, event_data=%d", dali_address, instance, event_data)
 
             # Find the DALI2 device
-            device_key = ("DALI2", dali_address)
+            device_key = ("DALI2", line_address(data.get("line", 0), dali_address))
             if device_key not in self._devices:
                 _LOGGER.debug("DALI2 event for unknown device: address=%d", dali_address)
                 return
@@ -635,15 +674,19 @@ class LunatoneClient:
         from .const import BUTTON_EVENT_TYPES
         return BUTTON_EVENT_TYPES.get(event_type, f"unknown_event_{event_type}")
 
-    def _resolve_command_targets(self, address_byte: int) -> list[DaliDevice] | None:
-        """Return the DALI gear addressed by the address byte of a forward frame.
+    def _resolve_command_targets(self, address_byte: int, line: int = 0) -> list[DaliDevice] | None:
+        """Return the DALI gear on ``line`` addressed by the address byte of a forward frame.
 
         Returns None for special commands (0xA0-0xFD), which do not address gear.
         """
-        lights = [device for (protocol, _), device in self._devices.items() if protocol == "DALI"]
+        lights = [
+            device
+            for (protocol, _), device in self._devices.items()
+            if protocol == "DALI" and device.line == line
+        ]
         if address_byte <= 0x7F:  # Short address: 0AAAAAAS
             address = address_byte >> 1
-            return [device for device in lights if device.address == address]
+            return [device for device in lights if device.short_address == address]
         if address_byte <= 0x9F:  # Group address: 100GGGGS
             group_number = (address_byte >> 1) & 0x0F
             return [device for device in lights if group_number in device.groups]
@@ -679,7 +722,7 @@ class LunatoneClient:
             return
 
         address_byte, opcode = dali_data
-        targets = self._resolve_command_targets(address_byte)
+        targets = self._resolve_command_targets(address_byte, data.get("line", 0))
         if not targets:
             return
 
@@ -761,7 +804,7 @@ class LunatoneClient:
                 if await self.connect():
                     _LOGGER.info("Reconnected successfully")
                     # Rescan devices after reconnection
-                    await self.scan_devices()
+                    await self.scan_all_lines()
                     break
             except Exception as e:
                 _LOGGER.error("Reconnection failed: %s", e)
@@ -856,7 +899,9 @@ class LunatoneClient:
         
         # Save current devices in case scan fails
         devices_backup = self._devices.copy()
-        self._devices.clear()
+        # Only this line is rescanned; devices found earlier on other lines are kept
+        for key in [k for k in self._devices if split_address(k[1])[0] == line]:
+            del self._devices[key]
 
         try:
             # Phase 1: Scan for DALI devices (addresses 0-63)
@@ -998,7 +1043,7 @@ class LunatoneClient:
 
                     # Create DALI device
                     device = DaliDevice(
-                        address=address,
+                        address=line_address(line, address),
                         protocol="DALI",
                         device_type=device_type,
                         device_name=device_name,
@@ -1006,7 +1051,7 @@ class LunatoneClient:
                     # Store all detected types for UI display (e.g. "DALI DT6,8")
                     device.device_types = detected_types
 
-                    self._devices[("DALI", address)] = device
+                    self._devices[("DALI", line_address(line, address))] = device
                     _LOGGER.debug("Found DALI device at address %d: type %d (%s)", address, device_type, device_name)
 
                     # Read extended device information from Memory Bank 0 (DALI1)
@@ -1055,13 +1100,13 @@ class LunatoneClient:
                     if capabilities is not None and capabilities != 255:
                         # Create DALI2 device (separate from DALI address space)
                         device = DaliDevice(
-                            address=address,
+                            address=line_address(line, address),
                             protocol="DALI2",
                             device_type=capabilities,
                             device_name=self._get_dali2_device_name(capabilities),
                             capabilities=capabilities,
                         )
-                        self._devices[("DALI2", address)] = device
+                        self._devices[("DALI2", line_address(line, address))] = device
                         
                         _LOGGER.debug("Device %d has DALI2 capabilities: 0x%02x", address, capabilities)
                         
@@ -1113,8 +1158,8 @@ class LunatoneClient:
             if scan_groups:
                 _LOGGER.info("Phase 3: Scanning group membership...")
                 for (protocol, address) in list(self._devices.keys()):
-                    if protocol != "DALI":
-                        continue  # Groups only apply to DALI devices
+                    if protocol != "DALI" or split_address(address)[0] != line:
+                        continue  # Groups only apply to DALI devices on this line
                     await asyncio.sleep(0.2)
                     try:
                         groups = await self.query_groups(address, line)
@@ -1124,7 +1169,7 @@ class LunatoneClient:
                     except Exception as e:
                         _LOGGER.debug("Error querying groups for address %d: %s", address, e)
 
-            _LOGGER.info("Scan complete. Found %d devices total", len(self._devices))
+            _LOGGER.info("Scan of line %d complete. Found %d devices total", line, len(self._devices))
             
             # Phase 4: Copy device info from DALI2 to DALI for dual-protocol devices
             # Some devices support both DALI and DALI2, creating separate entries (e.g., DALI_0 and DALI2_0)
@@ -1151,8 +1196,10 @@ class LunatoneClient:
                 _LOGGER.info("Copied device info for %d dual-protocol devices", copied_count)
             
             # Check if scan failed (found 0 devices when we had devices before)
-            if len(self._devices) == 0 and len(devices_backup) > 0:
-                _LOGGER.error("Scan failed: found 0 devices. Restoring previous device list.")
+            found_on_line = [k for k in self._devices if split_address(k[1])[0] == line]
+            had_on_line = [k for k in devices_backup if split_address(k[1])[0] == line]
+            if not found_on_line and had_on_line:
+                _LOGGER.error("Scan failed: found 0 devices on line %d. Restoring previous device list.", line)
                 self._devices = devices_backup
                 raise ConnectionError("Scan failed - connection may have been lost during scan")
             
@@ -1166,6 +1213,12 @@ class LunatoneClient:
             _LOGGER.error("Error during device scan: %s. Restoring previous device list.", e)
             self._devices = devices_backup
             raise
+
+    async def scan_all_lines(self, scan_groups: bool = True, scan_instances: bool = True) -> dict[tuple[str, int], DaliDevice]:
+        """Scan every configured DALI line, one after another."""
+        for line in self.lines:
+            await self.scan_devices(line, scan_groups=scan_groups, scan_instances=scan_instances)
+        return self._devices
 
     async def update_device_states(self, line: int = 0) -> None:
         """Update the current state (brightness, on/off, color temp) for all DALI light devices."""
@@ -1215,6 +1268,7 @@ class LunatoneClient:
 
     async def query_brightness(self, address: int, line: int = 0) -> int | None:
         """Query current brightness level of a device."""
+        line, address = split_address(address, line)
         try:
             # First, store actual level in DTR (command 33)
             dali_data = [(address << 1) | 1, CMD_STORE_ACTUAL_LEVEL_IN_DTR]
@@ -1249,6 +1303,7 @@ class LunatoneClient:
         This method attempts to query but will return None if not supported.
         Color temperature should be tracked when explicitly set via set_color_temp().
         """
+        line, address = split_address(address, line)
         try:
             # Enable Device Type 8
             dali_data = [193, 8]
@@ -1274,6 +1329,7 @@ class LunatoneClient:
         self, address: int, brightness: int, line: int = 0
     ) -> bool:
         """Set brightness of a device (0-100%)."""
+        line, address = split_address(address, line)
         try:
             # Convert percentage to DALI level (0-254)
             level = round((brightness / 100) * 254)
@@ -1297,6 +1353,7 @@ class LunatoneClient:
 
     async def turn_on(self, address: int, line: int = 0) -> bool:
         """Turn on a device (recall last level)."""
+        line, address = split_address(address, line)
         try:
             # Send "go to last level" command (10)
             dali_data = [(address << 1) | 1, 10]
@@ -1314,6 +1371,7 @@ class LunatoneClient:
 
     async def turn_off(self, address: int, line: int = 0) -> bool:
         """Turn off a device."""
+        line, address = split_address(address, line)
         try:
             # Send OFF command
             dali_data = [(address << 1) | 1, CMD_OFF]
@@ -1334,6 +1392,7 @@ class LunatoneClient:
         self, address: int, kelvin: int, line: int = 0
     ) -> bool:
         """Set color temperature for DT8 devices (in Kelvin)."""
+        line, address = split_address(address, line)
         try:
             # Convert Kelvin to mireds
             mireds = round(1000000 / kelvin)
@@ -1369,6 +1428,7 @@ class LunatoneClient:
 
     async def recall_max_level(self, address: int, line: int = 0) -> bool:
         """Turn device on to maximum level (direct arc power)."""
+        line, address = split_address(address, line)
         try:
             # Send direct arc power at level 254 (maximum)
             dali_data = [address << 1, 254]
@@ -1386,6 +1446,7 @@ class LunatoneClient:
 
     async def step_up(self, address: int, line: int = 0) -> bool:
         """Step brightness up."""
+        line, address = split_address(address, line)
         try:
             dali_data = [(address << 1) | 1, CMD_STEP_UP]
             await self._send_dali_frame(line, dali_data)
@@ -1397,6 +1458,7 @@ class LunatoneClient:
 
     async def step_down(self, address: int, line: int = 0) -> bool:
         """Step brightness down."""
+        line, address = split_address(address, line)
         try:
             dali_data = [(address << 1) | 1, CMD_STEP_DOWN]
             await self._send_dali_frame(line, dali_data)
@@ -1408,6 +1470,7 @@ class LunatoneClient:
 
     async def query_groups(self, address: int, line: int = 0) -> list[int]:
         """Query group membership for a device."""
+        line, address = split_address(address, line)
         groups = []
         try:
             # Query groups 0-7
@@ -1442,6 +1505,7 @@ class LunatoneClient:
 
     async def query_dali2_capabilities(self, address: int, line: int = 0) -> int | None:
         """Query DALI2 capabilities (24-bit command)."""
+        line, address = split_address(address, line)
         try:
             dali_data = [(address << 1) | 1, 0xFE, CMD_QUERY_DEVICE_CAPABILITIES]
             result = await self._send_dali_frame(
@@ -1462,6 +1526,7 @@ class LunatoneClient:
 
     async def query_num_instances(self, address: int, line: int = 0) -> int:
         """Query number of DALI2 instances (24-bit command)."""
+        line, address = split_address(address, line)
         try:
             dali_data = [(address << 1) | 1, 0xFE, CMD_QUERY_NUMBER_OF_INSTANCES]
             result = await self._send_dali_frame(
@@ -1484,6 +1549,7 @@ class LunatoneClient:
         self, address: int, instance: int, line: int = 0
     ) -> int | None:
         """Query DALI2 instance type (24-bit command)."""
+        line, address = split_address(address, line)
         try:
             dali_data = [(address << 1) | 1, instance, CMD_QUERY_INSTANCE_TYPE]
             result = await self._send_dali_frame(
@@ -1520,6 +1586,7 @@ class LunatoneClient:
         Returns list of feature type numbers. Feature Type 32 = Light output (feedback LED).
         Uses QUERY FEATURE TYPE (0x8E) and QUERY NEXT FEATURE TYPE (0x8F).
         """
+        line, address = split_address(address, line)
         features = []
         
         try:
@@ -1588,6 +1655,7 @@ class LunatoneClient:
         
         Returns GTIN, firmware version, hardware version, and identification number.
         """
+        line, address = split_address(address, line)
         info = {
             "gtin": None,
             "firmware_version": None,
@@ -1686,6 +1754,7 @@ class LunatoneClient:
         Returns dict with hex values for internal storage (gtin_hex, id_hex)
         and formatted values for display (gtin, firmware_version, etc.)
         """
+        line, address = split_address(address, line)
         info = {
             "gtin": None,  # Decimal format for display
             "gtin_hex": None,  # Hex format for internal storage
@@ -1793,6 +1862,7 @@ class LunatoneClient:
         Returns:
             True if command was sent successfully
         """
+        line, address = split_address(address, line)
         try:
             # 24-bit frame: [address<<1+1, 0x20+instance, 0x10 (ON) or 0x11 (OFF)]
             from .const import FEEDBACK_LED_ON, FEEDBACK_LED_OFF
@@ -1831,7 +1901,7 @@ class LunatoneClient:
             await self._send_dali_frame(line, dali_data)
             # Our own frames are not tracked from the bus monitor, so update members here
             self._apply_gear_state(
-                self._resolve_command_targets(address_byte) or [], level > 0, round((level / 254) * 100)
+                self._resolve_command_targets(address_byte, line) or [], level > 0, round((level / 254) * 100)
             )
             
             _LOGGER.debug("Set group %d brightness to level %d", group_number, level)
@@ -1886,7 +1956,7 @@ class LunatoneClient:
             await self._send_dali_frame(line, dali_data)
             # Our own frames are not tracked from the bus monitor, so update all gear here
             self._apply_gear_state(
-                self._resolve_command_targets(0xFE) or [], level > 0, round((level / 254) * 100)
+                self._resolve_command_targets(0xFE, line) or [], level > 0, round((level / 254) * 100)
             )
             
             _LOGGER.debug("Set broadcast brightness to level %d", level)

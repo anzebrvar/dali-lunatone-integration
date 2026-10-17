@@ -10,6 +10,14 @@ CONF_PORT: Final = "port"
 CONF_BACKGROUND_STATUS_POLLING: Final = "background_status_polling"
 CONF_POLLING_INTERVAL: Final = "polling_interval"
 CONF_SCAN_NEW_DEVICES_ON_STARTUP: Final = "scan_new_devices_on_startup"
+CONF_DALI_LINES: Final = "dali_lines"
+DEFAULT_DALI_LINES: Final = [0]
+DALI_LINE_COUNT: Final = 4  # DALI-2 IoT4 has four lines (0-3)
+
+# Devices on line N are keyed by address N * DALI_LINE_SPAN + short address, so
+# line 0 keeps its plain 0-63 addresses (and its existing unique IDs) and the
+# same short address on different lines cannot collide.
+DALI_LINE_SPAN: Final = 64
 DEFAULT_PORT: Final = 80
 DEFAULT_NAME: Final = "Lunatone DALI"
 DEFAULT_POLLING_INTERVAL: Final = 1800  # 30 minutes in seconds

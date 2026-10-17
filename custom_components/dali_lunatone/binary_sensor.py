@@ -13,6 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .lunatone_api import device_label
 from .const import DOMAIN, FEATURE_TYPES
 from .coordinator import LunatoneCoordinator
 
@@ -113,7 +114,7 @@ class DaliBinarySensor(CoordinatorEntity, BinarySensorEntity):
         device_key = (self._protocol, self._address)
         device_info_dict = {
             "identifiers": {(DOMAIN, f"{self._protocol}_{self._address}")},
-            "name": f"{self._protocol} Address {self._address}",
+            "name": device_label(self._protocol, self._address),
             "model": self._device.device_name,
             "via_device": (DOMAIN, self.coordinator.config_entry.entry_id),
         }
