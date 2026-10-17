@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .lunatone_api import device_label
+from .lunatone_api import device_label, line_device_identifier, split_address
 from .const import DOMAIN, FEATURE_TYPES
 from .coordinator import LunatoneCoordinator
 
@@ -116,7 +116,10 @@ class DaliBinarySensor(CoordinatorEntity, BinarySensorEntity):
             "identifiers": {(DOMAIN, f"{self._protocol}_{self._address}")},
             "name": device_label(self._protocol, self._address),
             "model": self._device.device_name,
-            "via_device": (DOMAIN, self.coordinator.config_entry.entry_id),
+            "via_device": (
+                DOMAIN,
+                line_device_identifier(self.coordinator.config_entry.entry_id, split_address(self._address)[0]),
+            ),
         }
         
         # Try to get fresh device data from coordinator

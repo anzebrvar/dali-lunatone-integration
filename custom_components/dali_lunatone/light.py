@@ -32,7 +32,7 @@ from .const import (
     MIN_COLOR_TEMP_KELVIN,
 )
 from .coordinator import LunatoneCoordinator
-from .lunatone_api import DaliDevice, device_label
+from .lunatone_api import DaliDevice, device_label, line_device_identifier, split_address
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -56,16 +56,19 @@ def _aggregate_state(devices: list[DaliDevice]) -> tuple[bool | None, int | None
 
 def _groups_device_info(entry: ConfigEntry, line: int) -> DeviceInfo:
     """Return the device that holds the group/broadcast lights of a DALI line."""
+    via = (DOMAIN, line_device_identifier(entry.entry_id, line))
     if line == 0:
         return DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_groups")},
             name="DALI Groups",
             model="DALI Group Controller",
+            via_device=via,
         )
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry.entry_id}_L{line}_groups")},
         name=f"DALI Line {line} Groups",
         model="DALI Group Controller",
+        via_device=via,
     )
 
 
@@ -232,7 +235,7 @@ class LunatoneDaliLight(CoordinatorEntity[LunatoneCoordinator], LightEntity):
             identifiers={(DOMAIN, f"{protocol}_{address}")},
             name=device_label(protocol, address),
             model=model_label,
-            via_device=(DOMAIN, self.coordinator.config_entry.entry_id),
+            via_device=(DOMAIN, line_device_identifier(self.coordinator.config_entry.entry_id, split_address(self._address)[0])),
         )
         
         # Add extended device information if available
@@ -280,6 +283,8 @@ class LunatoneDaliLight(CoordinatorEntity[LunatoneCoordinator], LightEntity):
         attrs: dict[str, Any] = {
             ATTR_ADDRESS: self._address,
             ATTR_PROTOCOL: self._protocol,
+            "dali_line": split_address(self._address)[0],
+            "short_address": split_address(self._address)[1],
             ATTR_DEVICE_TYPE: self._device.device_type,
             ATTR_DEVICE_NAME: self._device.device_name,
         }
@@ -411,7 +416,7 @@ class FeedbackLedLight(CoordinatorEntity[LunatoneCoordinator], LightEntity):
             identifiers={(DOMAIN, f"{self._protocol}_{self._address}")},
             name=device_label(self._protocol, self._address),
             model=model,
-            via_device=(DOMAIN, self.coordinator.config_entry.entry_id),
+            via_device=(DOMAIN, line_device_identifier(self.coordinator.config_entry.entry_id, split_address(self._address)[0])),
         )
 
         if device:

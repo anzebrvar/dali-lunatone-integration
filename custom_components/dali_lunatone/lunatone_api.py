@@ -75,6 +75,11 @@ def split_address(address: int, line: int = 0) -> tuple[int, int]:
     return line, address
 
 
+def line_device_identifier(entry_id: str, line: int) -> str:
+    """Return the device-registry identifier of the "DALI Bus N" device for a line."""
+    return f"{entry_id}_line_{line}"
+
+
 def device_label(protocol: str, address: int) -> str:
     """Return the default device name, e.g. "DALI Address 4" or "DALI Line 1 Address 4"."""
     line, short_address = split_address(address)
