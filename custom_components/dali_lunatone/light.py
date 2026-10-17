@@ -32,7 +32,7 @@ from .const import (
     MIN_COLOR_TEMP_KELVIN,
 )
 from .coordinator import LunatoneCoordinator
-from .lunatone_api import DaliDevice, device_label, line_device_identifier, split_address
+from .lunatone_api import DaliDevice, bus_model, device_label, line_device_identifier, split_address
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -61,13 +61,13 @@ def _groups_device_info(entry: ConfigEntry, line: int) -> DeviceInfo:
         return DeviceInfo(
             identifiers={(DOMAIN, f"{entry.entry_id}_groups")},
             name="DALI Groups",
-            model="DALI Group Controller",
+            model=f"Bus {line} · DALI Group Controller",
             via_device=via,
         )
     return DeviceInfo(
         identifiers={(DOMAIN, f"{entry.entry_id}_L{line}_groups")},
         name=f"DALI Line {line} Groups",
-        model="DALI Group Controller",
+        model=f"Bus {line} · DALI Group Controller",
         via_device=via,
     )
 
@@ -229,7 +229,7 @@ class LunatoneDaliLight(CoordinatorEntity[LunatoneCoordinator], LightEntity):
         
         # Build model label: show all types for multi-type devices, e.g. "DALI DT6,8"
         types_label = device.device_types_label if hasattr(device, "device_types_label") else f"DT{device.device_type}"
-        model_label = f"{protocol} {types_label}"
+        model_label = bus_model(address, f"{protocol} {types_label}")
 
         device_info_dict = DeviceInfo(
             identifiers={(DOMAIN, f"{protocol}_{address}")},
@@ -410,7 +410,7 @@ class FeedbackLedLight(CoordinatorEntity[LunatoneCoordinator], LightEntity):
     def device_info(self) -> DeviceInfo:
         """Return device info."""
         device = (self.coordinator.data or {}).get(self._device_key)
-        model = device.device_name if device else "DALI2 Device"
+        model = bus_model(self._address, device.device_name if device else "DALI2 Device")
 
         device_info_dict = DeviceInfo(
             identifiers={(DOMAIN, f"{self._protocol}_{self._address}")},

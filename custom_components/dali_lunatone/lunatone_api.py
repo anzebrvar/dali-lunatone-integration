@@ -80,6 +80,11 @@ def line_device_identifier(entry_id: str, line: int) -> str:
     return f"{entry_id}_line_{line}"
 
 
+def bus_model(address: int, model: str) -> str:
+    """Prefix a device model with its DALI bus, e.g. "Bus 1 · DALI DT6", so the bus shows in device lists."""
+    return f"Bus {split_address(address)[0]} · {model}"
+
+
 def device_label(protocol: str, address: int) -> str:
     """Return the default device name, e.g. "DALI Address 4" or "DALI Line 1 Address 4"."""
     line, short_address = split_address(address)
